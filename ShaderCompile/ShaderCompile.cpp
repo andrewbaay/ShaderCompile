@@ -121,6 +121,7 @@ struct CByteCodeBlock
 	}
 };
 
+
 static bool CompareDynamicComboIDs( const std::unique_ptr<CByteCodeBlock>& pA, const std::unique_ptr<CByteCodeBlock>& pB )
 {
 	return pA->m_nComboID < pB->m_nComboID;
@@ -855,6 +856,89 @@ static void WriteShaderFiles( const char* pShaderName, bool end )
 	}
 }
 
+
+static void PrintCompileErrors()
+{
+	// Write all the errors
+	//////////////////////////////////////////////////////////////////////////
+	//
+	// Now deliver all our accumulated spew to the output
+	//
+	//////////////////////////////////////////////////////////////////////////
+
+	if (const int numShaderMsgs = g_Master_CompilerMsg.GetNumStrings())
+	{
+		int totalWarnings = 0, totalErrors = 0;
+		g_Master_CompilerMsg.ForEach([&totalWarnings, &totalErrors](const CompilerMsg& msg) {
+			totalWarnings += msg.warning.GetNumStrings();
+			totalErrors += msg.error.GetNumStrings();
+			});
+		std::cout << clr::yellow << "WARNINGS" << clr::reset << "/" << clr::red << "ERRORS " << clr::reset << totalWarnings << "/" << totalErrors << std::endl;
+
+		const auto& trim = [](const char* str) -> std::string {
+			std::string s(str);
+			s.erase(std::find_if(s.rbegin(), s.rend(), [](int ch) { return !std::isspace(ch); }).base(), s.end());
+			return s;
+		};
+
+		const size_t cwdLen = fs::current_path().string().length() + 1;
+
+		for (int i = 0; i < numShaderMsgs; i++)
+		{
+			const auto& msg = g_Master_CompilerMsg[gsl::narrow<UtlSymId_t>(i)];
+			const char* const shaderName = g_Master_CompilerMsg.String(i);
+			const std::string searchPat = *cmdLine.lastArgs[0] + "("; // TODO: rework when readding support for multiple files
+			const size_t nameLen = searchPat.length();
+
+			if (const int warnings = msg.warning.GetNumStrings())
+				std::cout << shaderName << " " << clr::yellow << warnings << " WARNING(S):                                                         " << clr::reset << std::endl;
+
+			for (int k = 0, kEnd = msg.warning.GetNumStrings(); k < kEnd; ++k)
+			{
+				const char* const szMsg = msg.warning.String(k);
+				const CompilerMsgInfo& cmi = msg.warning[gsl::narrow<UtlSymId_t>(k)];
+				const int numReported = cmi.GetNumTimesReported();
+
+				std::string m = trim(szMsg);
+				size_t find;
+				if ((find = m.find(searchPat)) != std::string::npos && find > cwdLen)
+					m = m.replace(find - cwdLen, cwdLen, "");
+				std::cout << m << "\nReported " << clr::green << numReported << clr::reset << " time(s)" << std::endl;
+			}
+
+			if (const int errors = msg.error.GetNumStrings())
+				std::cout << shaderName << " " << clr::red << errors << " ERROR(S):                                                               " << clr::reset << std::endl;
+
+			// Compiler spew
+			for (int k = 0, kEnd = msg.error.GetNumStrings(); k < kEnd; ++k)
+			{
+				const char* const szMsg = msg.error.String(k);
+				const CompilerMsgInfo& cmi = msg.error[gsl::narrow<UtlSymId_t>(k)];
+				const std::string& cmd = cmi.GetFirstCommand();
+				const int numReported = cmi.GetNumTimesReported();
+
+				std::string m = trim(szMsg);
+				size_t find;
+				if ((find = m.find(searchPat)) != std::string::npos && find > cwdLen)
+					m = m.replace(find - cwdLen, cwdLen, "");
+				std::cout << m << "\nReported " << clr::green << numReported << clr::reset << " time(s), example command: " << std::endl;
+
+				std::cout << "    " << clr::green << cmd << " " << shaderName << ".fxc" << clr::reset << std::endl;
+			}
+		}
+	}
+
+	// Failed shaders summary
+	for (int k = 0, kEnd = g_Master_ShaderHadError.GetNumStrings(); k < kEnd; ++k)
+	{
+		const char* szShaderName = g_Master_ShaderHadError.String(k);
+		if (!g_Master_ShaderHadError[gsl::narrow<UtlSymId_t>(k)])
+			continue;
+
+		std::cout << clr::pinkish << "FAILED: " << clr::red << szShaderName << clr::reset << std::endl;
+	}
+}
+
 // Assemble a reply package to the master from the compiled bytecode
 // return the length of the package.
 static size_t AssembleWorkerReplyPackage( const CfgProcessor::CfgEntryInfo* pEntry, uint64_t nComboOfEntry, CUtlBuffer& pBuf )
@@ -907,6 +991,12 @@ static size_t AssembleWorkerReplyPackage( const CfgProcessor::CfgEntryInfo* pEnt
 				  << clr::green2 << s_averageProcess.GetAverage() << clr::reset << " c/m) ] " << FormatTimeShort( std::chrono::duration_cast<std::chrono::seconds>( fCurTime - g_flStartTime ).count() ) << " elapsed         \r";
 		s_fLastInfoTime = fCurTime;
 	}
+
+	if (g_Master_ShaderHadError.Defined(pEntry->m_szName)) {
+		PrintCompileErrors();
+		return 0;
+	}
+	
 	GLOBAL_DATA_MTX_UNLOCK();
 
 	return nBytesWritten;
@@ -1375,7 +1465,7 @@ public:
 	}
 
 public:
-	void ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd );
+	void ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd, const char* pShaderName);
 
 	void Stop();
 	bool Stoped() const { return m_bStopped; }
@@ -1449,8 +1539,10 @@ void ProcessCommandRange_Singleton::Stop()
 }
 
 
-void ProcessCommandRange_Singleton::ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd )
+void ProcessCommandRange_Singleton::ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd, const char * pShaderName )
 {
+
+
 	if ( m_MT.pWorkerObj )
 	{
 		MT::WorkerClass_t* pWorkerObj = m_MT.pWorkerObj;
@@ -1576,7 +1668,8 @@ static void CompileShaders()
 		//
 		// Compile stuff
 		//
-		pcr.ProcessCommandRange( pEntry->m_iCommandStart, pEntry->m_iCommandEnd );
+		const char* szShaderToCompile = pEntry->m_szName;
+		pcr.ProcessCommandRange( pEntry->m_iCommandStart, pEntry->m_iCommandEnd, szShaderToCompile);
 
 		if ( pcr.Stoped() )
 			break;
@@ -1654,87 +1747,6 @@ static LONG WINAPI ExceptionFilter( _EXCEPTION_POINTERS* pExceptionInfo )
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static void PrintCompileErrors()
-{
-	// Write all the errors
-	//////////////////////////////////////////////////////////////////////////
-	//
-	// Now deliver all our accumulated spew to the output
-	//
-	//////////////////////////////////////////////////////////////////////////
-
-	if ( const int numShaderMsgs = g_Master_CompilerMsg.GetNumStrings() )
-	{
-		int totalWarnings = 0, totalErrors = 0;
-		g_Master_CompilerMsg.ForEach( [&totalWarnings, &totalErrors]( const CompilerMsg& msg ) {
-			totalWarnings += msg.warning.GetNumStrings();
-			totalErrors += msg.error.GetNumStrings();
-		} );
-		std::cout << clr::yellow << "WARNINGS" << clr::reset << "/" << clr::red << "ERRORS " << clr::reset << totalWarnings << "/" << totalErrors << std::endl;
-
-		const auto& trim = []( const char* str ) -> std::string {
-			std::string s( str );
-			s.erase( std::find_if( s.rbegin(), s.rend(), []( int ch ) { return !std::isspace( ch ); } ).base(), s.end() );
-			return s;
-		};
-
-		const size_t cwdLen = fs::current_path().string().length() + 1;
-
-		for ( int i = 0; i < numShaderMsgs; i++ )
-		{
-			const auto& msg              = g_Master_CompilerMsg[gsl::narrow<UtlSymId_t>( i )];
-			const char* const shaderName = g_Master_CompilerMsg.String( i );
-			const std::string searchPat  = *cmdLine.lastArgs[0] + "("; // TODO: rework when readding support for multiple files
-			const size_t nameLen         = searchPat.length();
-
-			if ( const int warnings = msg.warning.GetNumStrings() )
-				std::cout << shaderName << " " << clr::yellow << warnings << " WARNING(S):                                                         " << clr::reset << std::endl;
-
-			for ( int k = 0, kEnd = msg.warning.GetNumStrings(); k < kEnd; ++k )
-			{
-				const char* const szMsg    = msg.warning.String( k );
-				const CompilerMsgInfo& cmi = msg.warning[gsl::narrow<UtlSymId_t>( k )];
-				const int numReported      = cmi.GetNumTimesReported();
-
-				std::string m = trim( szMsg );
-				size_t find;
-				if ( ( find = m.find( searchPat ) ) != std::string::npos && find > cwdLen )
-					m = m.replace( find - cwdLen, cwdLen, "" );
-				std::cout << m << "\nReported " << clr::green << numReported << clr::reset << " time(s)" << std::endl;
-			}
-
-			if ( const int errors = msg.error.GetNumStrings() )
-				std::cout << shaderName << " " << clr::red << errors << " ERROR(S):                                                               " << clr::reset << std::endl;
-
-			// Compiler spew
-			for ( int k = 0, kEnd = msg.error.GetNumStrings(); k < kEnd; ++k )
-			{
-				const char* const szMsg          = msg.error.String( k );
-				const CompilerMsgInfo& cmi       = msg.error[gsl::narrow<UtlSymId_t>( k )];
-				const std::string& cmd           = cmi.GetFirstCommand();
-				const int numReported            = cmi.GetNumTimesReported();
-
-				std::string m = trim( szMsg );
-				size_t find;
-				if ( ( find = m.find( searchPat ) ) != std::string::npos && find > cwdLen )
-					m = m.replace( find - cwdLen, cwdLen, "" );
-				std::cout << m << "\nReported " << clr::green << numReported << clr::reset << " time(s), example command: " << std::endl;
-
-				std::cout << "    " << clr::green << cmd << " " << shaderName << ".fxc" << clr::reset << std::endl;
-			}
-		}
-	}
-
-	// Failed shaders summary
-	for ( int k = 0, kEnd = g_Master_ShaderHadError.GetNumStrings(); k < kEnd; ++k )
-	{
-		const char* szShaderName = g_Master_ShaderHadError.String( k );
-		if ( !g_Master_ShaderHadError[gsl::narrow<UtlSymId_t>( k )] )
-			continue;
-
-		std::cout << clr::pinkish << "FAILED: " << clr::red << szShaderName << clr::reset << std::endl;
-	}
-}
 
 static bool s_write = true;
 static BOOL WINAPI CtrlHandler( DWORD signal )
