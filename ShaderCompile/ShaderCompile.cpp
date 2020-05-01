@@ -1465,7 +1465,7 @@ public:
 	}
 
 public:
-	void ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd, const char* pShaderName);
+	void ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd);
 
 	void Stop();
 	bool Stoped() const { return m_bStopped; }
@@ -1539,7 +1539,7 @@ void ProcessCommandRange_Singleton::Stop()
 }
 
 
-void ProcessCommandRange_Singleton::ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd, const char * pShaderName )
+void ProcessCommandRange_Singleton::ProcessCommandRange( uint64_t shaderStart, uint64_t shaderEnd )
 {
 
 
@@ -1668,8 +1668,7 @@ static void CompileShaders()
 		//
 		// Compile stuff
 		//
-		const char* szShaderToCompile = pEntry->m_szName;
-		pcr.ProcessCommandRange( pEntry->m_iCommandStart, pEntry->m_iCommandEnd, szShaderToCompile);
+		pcr.ProcessCommandRange( pEntry->m_iCommandStart, pEntry->m_iCommandEnd);
 
 		if ( pcr.Stoped() )
 			break;
